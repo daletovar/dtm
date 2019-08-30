@@ -1,29 +1,49 @@
 import numpy as np 
 import nibabel as nib 
-
 from pySINDy import SINDy 
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA,FastICA
 from nilearn.input_data import NiftiMasker
-
+from collections.abc import Iterable
 
 
 class DTM(object):
 
     def __init__(self,
                 n_conditions,
+                condition_names=None,
                 dt=0.01,
                 poly_degree=2):
+        """
+        n_conditions: the number of conditions - 'EV' in fsl - integer
+        conditions_names: the name of each of the conditions - list,array
+        dt: the size of the time step for the SINDy differentiation 
+            and the later RK4 integration - float
+        poly_degree: the degree of the polynomials for the SINDy theta library - integer
+        """
+
         self.n_conditions = n_conditions
         self.dt = dt 
         self.poly_degree=2
+        if condition_names is not None:
+            if not isinstance(condition_names,Iterable):
+                raise NotImplementedError('condition_names must be Iterable')
+        self.condition_names = condition_names
     
     
     def fit(self,
             nifti,
-            onsets,
+            onset_files,
             mask=None,
-            pca=True, 
-            n_components=10):
+            decomp='pca', 
+            n_components=3):
+
+        """
+        nifti: a 4D nifti file containing the fmri time series
+        onset_files: a list of paths to the onset files for each EV
+        mask: an roi mask in the same space as the time series
+        decomp: decomposition method to apply - pca or ica
+        n_components: number of components to use in decomposition
+        """
 
         if not isinstance(nifti, nib.Nifti1Image):
             try:
@@ -42,104 +62,143 @@ class DTM(object):
         self.mask = mask
         data = NiftiMasker(mask_img=mask).fit_transform(nifti) 
         
-        if pca:
-            pca_model = PCA(n_components=n_components).fit(data.T)
-            self.pca_model = pca_model
-            data = pca_model.transform(data.T).T
+        
+        decomp_model = {'pca': PCA,
+                        'ica': FastICA
+                        }[decomp](n_components=n_components).fit(data.T)
+        self.decomp_model = decomp_model
+        data = decomp_model.transform(data.T).T
 
         # read onset files
-        
+        onsets = np.zeros((self.n_conditions,data.shape[1]))
+        min = 100
+        max = 0
+        for i,file in enumerate(onset_files):
+            try:
+                idx = (np.loadtxt(file)[0]/2 + 2).astype(np.int_p)
+                onsets[i,idx] = 1
+                task_min = idx.min()
+                task_max = idx.max()
+                if task_min < min:
+                    min = task_min
+                if task_max > max:
+                    max = task_max
+            except:
+                raise IOError('cannot read {}'.format(file))
+
+
         self.n_state_vars = data.shape[0]
         data = np.vstack((data,onsets))
+        data = data[:,min:max+1]
 
         # sindy model here
         self.sindy_model = SINDy()
         self.sindy_model.fit(data,self.dt,poly_degree=self.poly_degree)
         
 
+    @property
+    def equations(self):
+        """
+        show equations
+        """
+        coef = self.sindy_model.coefficients
+        desc = np.array(self.sindy_model.descriptions)
+        for i in range(coef.shape[1] - self.n_conditions):
+            eq = 'u{}/dt = '.format(i)
+            idx = np.nonzero(coef[:,i])[0]
+            for j in idx: 
+                eq += str(coef[j,i]) + desc[j] + ' '
+                if j != idx[-1]:
+                    eq += '+ '
+            print(eq)
 
-        def equations(self):
-            """
-            show equations
-            """
-            coef = self.sindy_model.coefficients
-            desc = np.array(self.sindy_model.descriptions)
-            for i in range(coef.shape[1] - self.n_conditions):
-                eq = 'u{}/dt = '.format(i)
-                idx = np.nonzero(coef[:,i])[0]
-                for j in idx: 
-                    eq += str(coef[j,i]) + desc[j] + ' '
-                    if j != idx[-1]:
-                        eq += '+ '
-                print(eq)
+    def desc_to_functions(self):
+        """
+        5.668(u0 * u1)**2
+        """
+    
+    def predict(self,nifti,onset_files):
+        """
+        integrates the system using RK4 to generate predictions
+        given new onset files and initial conditions
 
-        def desc_to_functions(self):
-            """
-            5.668(u0 * u1)**2
-            """
+        nifti: a 4D nifti file containing the fmri time series
+        onset_files: a list of paths to the onset files for each EV
+        """
         
-        def RK4(n,current_vals,f,step=0.2):
-            """
-            n: number of state variables
-            """
+        # dx/dt = f(x)
+        def f(vals,i):
+            exponents = model.get_ordered_poly_exponents(self.n_state_vars + self.n_conditions, 
+                        self.poly_degree)[:,i]
+            coef = self.sindy_model._coef[:,i]
+            nnz = np.nonzero(coef)[0]
+            total = 0
+            for idx in nnz:
+                pass
+            pass
+            return
 
-            t1 = t2 = t3 = np.empty(n,dtype=np.float)
-            k1 = k2 = k3 = k4 = np.empty(n,dtype=np.float)
-            
-            for i in range(n): t1[i] = current_vals[i]+0.5*(k1[i]=step*f(x, y, i))
-            for i in range(n): t1[i] = current_vals[i]+0.5*(k1[i]=step*f(x, y, i))
-            for i in range(n): t1[i] = current_vals[i]+0.5*(k1[i]=step*f(x, y, i))
-            for i in range(n): t1[i] = current_vals[i]+0.5*(k1[i]=step*f(x, y, i))
+        # somehow get data
+        data = self.decomp_model.transform(NiftiMasker(self.mask).fit_transform(nifti))
+        
 
-            for i in range(n):
+        # read onset files
+        onsets = np.zeros((self.n_conditions,data.shape[1]))
+        min = 100
+        max = 0
+        for i,file in enumerate(onset_files):
+            try:
+                idx = (np.loadtxt(file)[0]/2 + 2).astype(np.int_p)
+                onsets[i,idx] = 1
+                task_min = idx.min()
+                task_max = idx.max()
+                if task_min < min:
+                    min = task_min
+                if task_max > max:
+                    max = task_max
+            except:
+                raise IOError('cannot read {}'.format(file))
 
-            k1 = stepsize * f(current_vals)
-            k2 = stepsize * f(current_vals + 0.5 * stepsize)
-            k3 = stepsize * f()
+        data = np.vstack((data,onsets))
+        data = data[:,min:max+1]
 
-        def predict(self,nifti,onsets):
-            """
-            integrates the system using RK4 to generate predictions
-            given new onset files and initial conditions
-            """
-            
-            def f(model,vals,i):
-                exponents = model.get_ordered_poly_exponents(self.n_state_vars + self.n_conditions, 
-                            self.poly_degree)[:,i]
-                coef = self.sindy_model._coef[:,i]
-                nnz = np.nonzero(coef)[0]
-                total = 0
-                for idx in nnz:
-
-
-
-
-            # somehow get data
-            data = self.pca_model.transform(NiftiMasker(self.mask).fit_transform(nifti))
-
-            # read onset files
-
-            init_conditions = data[:,0]
-            vals = np.zeros((data.shape[0]+self.n_conditions, data.shape[1]))
-            vals[:self.n_state_vars,0] =  data[:,0]
-            vals[self.n_state_vars:,:] =  onsets
-
-            for step in range(1,data.shape[1]):
-                vals[:,step] = RK4(model,vals[:,step-1])
-
-            return vals, data
+        vals = np.zeros(data.shape)
+        vals[:self.n_state_vars,0] =  data[:,0] # initial conditions
+        vals[self.n_state_vars:,:] =  data[self.n_state_vars:,:] # copy onsets
+        for step in range(1,data.shape[1]):
+            vals[:self.n_state_vars,step] = RK4(
+                        self.n_state_vars,vals[:,step-1],f,self.dt)
+        return vals, data
 
 
 
             
 
 
-        def plot_components(self):
-            """
-            render pca components to a nifti and visualize them
-            """
+    def plot_components(self):
+        """
+        render pca components to a nifti and visualize them
+        """
 
-
+def RK4(n,y,f,step=0.2):
+    """
+    n: number of state variables
+    y: values of each of the state variables at the current time step
+    f: the derivative function - different for each state variable
+    step: delta t
+    """
+    k1 = np.empty(n,dtype=np.float)
+    k2 = np.empty(n,dtype=np.float)
+    k3 = np.empty(n,dtype=np.float)
+    k4 = np.empty(n,dtype=np.float)
+    output = np.empty(n,dtype=np.float)
+    for i in range(n):
+        k1[i] = step * f(y,i)
+        k2[i] = step * f(y + (0.5 * k1[i]),i)
+        k3[i] = step * f(y + (0.5 * k2[i]),i)
+        k4[i] = step * f(y + k3[i],i)
+        output[i] = y[i] + (1.0/6.0)*(k1[i] + 2*k2[i] + 2*k3[i] + k4[i])
+    return output
         
 
         
