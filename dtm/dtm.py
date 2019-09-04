@@ -1,5 +1,6 @@
 import numpy as np 
 import nibabel as nib 
+import sympy
 from pySINDy import SINDy 
 from sklearn.decomposition import PCA,FastICA
 from nilearn.input_data import NiftiMasker
@@ -94,7 +95,7 @@ class DTM(object):
         # sindy model here
         self.sindy_model = SINDy()
         self.sindy_model.fit(data,self.dt,poly_degree=self.poly_degree)
-        
+        self.desc_to_functions()
 
     @property
     def equations(self):
@@ -116,6 +117,47 @@ class DTM(object):
         """
         5.668(u0 * u1)**2
         """
+        desc = self.sindy_model.descriptions
+        var_dict = {}
+        for n in range(self.n_state_vars + self.n_conditions):
+            var_dict['u{}'.format(n)] = sympy.Symbol('u{}'.format(n))
+        
+        expressions = [1]
+        
+        for d in desc[1:]:
+            # single vars first
+            if d in var_dict:
+                expressions.append(var_dict[d])
+            elif '^' not in d:
+                splits = d.split('u')[1:] # remove empty string
+                expr = var_dict['u{}'.format(splits[0])]
+                for s in range(1,len(splits)):
+                    expr *= var_dict['u{}'.format(splits[s])]
+                    expressions.append(expr)
+                var_dict[d] = expr
+            else:
+                loc = d.find('^')
+                expr = var_dict[d[:loc]]**int(d[loc+2])
+                splits = d.split('}')[1:]
+                if splits[0] != '':
+                    expr *= var_dict[splits[0]]
+                expressions.append(expr)
+        equations = []
+        functions = []
+        coefs = self.sindy_model.coefficients
+        state_vars = []
+        for n in range(self.n_state_vars + self.n_conditions): 
+            state_vars.append(sympy.Symbol('u{}'.format(n)))
+
+        for i in range(coefs.shape[1]):
+            idx = np.nonzero(coefs[:,i])[0]
+            expr = expressions[idx[0]] * coefs[idx[0],i]
+            for j in idx[1:]:
+                expr += expressions[idx[0]] * coefs[j,i]
+            equations.append(expr)               
+            functions.append(sympy.lambdify(state_vars,expr))
+        self.equations = equations 
+        self.functions = functions
     
     def predict(self,nifti,onset_files):
         """
@@ -125,18 +167,6 @@ class DTM(object):
         nifti: a 4D nifti file containing the fmri time series
         onset_files: a list of paths to the onset files for each EV
         """
-        
-        # dx/dt = f(x)
-        def f(vals,i):
-            exponents = model.get_ordered_poly_exponents(self.n_state_vars + self.n_conditions, 
-                        self.poly_degree)[:,i]
-            coef = self.sindy_model._coef[:,i]
-            nnz = np.nonzero(coef)[0]
-            total = 0
-            for idx in nnz:
-                pass
-            pass
-            return
 
         # somehow get data
         data = self.decomp_model.transform(NiftiMasker(self.mask).fit_transform(nifti))
@@ -167,12 +197,8 @@ class DTM(object):
         vals[self.n_state_vars:,:] =  data[self.n_state_vars:,:] # copy onsets
         for step in range(1,data.shape[1]):
             vals[:self.n_state_vars,step] = RK4(
-                        self.n_state_vars,vals[:,step-1],f,self.dt)
+                        self.n_state_vars,vals[:,step-1],self.functions,self.dt)
         return vals, data
-
-
-
-            
 
 
     def plot_components(self):
@@ -193,10 +219,10 @@ def RK4(n,y,f,step=0.2):
     k4 = np.empty(n,dtype=np.float)
     output = np.empty(n,dtype=np.float)
     for i in range(n):
-        k1[i] = step * f(y,i)
-        k2[i] = step * f(y + (0.5 * k1[i]),i)
-        k3[i] = step * f(y + (0.5 * k2[i]),i)
-        k4[i] = step * f(y + k3[i],i)
+        k1[i] = step * f[i](y)
+        k2[i] = step * f[i](y + (0.5 * k1[i]))
+        k3[i] = step * f[i](y + (0.5 * k2[i]))
+        k4[i] = step * f[i](y + k3[i])
         output[i] = y[i] + (1.0/6.0)*(k1[i] + 2*k2[i] + 2*k3[i] + k4[i])
     return output
         
