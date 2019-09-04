@@ -219,10 +219,10 @@ def RK4(n,y,f,step=0.2):
     k4 = np.empty(n,dtype=np.float)
     output = np.empty(n,dtype=np.float)
     for i in range(n):
-        k1[i] = step * f[i](y)
-        k2[i] = step * f[i](y + (0.5 * k1[i]))
-        k3[i] = step * f[i](y + (0.5 * k2[i]))
-        k4[i] = step * f[i](y + k3[i])
+        k1[i] = step * f[i](*y)
+        k2[i] = step * f[i](*y + (0.5 * k1[i]))
+        k3[i] = step * f[i](*y + (0.5 * k2[i]))
+        k4[i] = step * f[i](*y + k3[i])
         output[i] = y[i] + (1.0/6.0)*(k1[i] + 2*k2[i] + 2*k3[i] + k4[i])
     return output
         
